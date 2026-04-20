@@ -1,0 +1,109 @@
+# hc-thermostat
+
+Virtual thermostat plugin for [homeCore](https://github.com/homeCore-io/homeCore).
+
+Aggregates one or more temperature sensor devices, applies configurable
+hysteresis around a setpoint, and turns an actuator device on/off according
+to heat/cool/off mode. Optional short-cycle protection (`min_on_secs` /
+`min_off_secs`) prevents HVAC compressor damage.
+
+## Supported device types
+
+| Kind | device_type | Description |
+|---|---|---|
+| Virtual thermostat | `thermostat` | Per `[[thermostat]]` entry in config |
+
+## Setup
+
+1. Copy `config/config.toml.example` to `config/config.toml` and fill in
+   broker credentials + at least one `[[thermostat]]` block.
+2. Add an MQTT ACL entry for `plugin.thermostat` on the broker — the plugin
+   needs publish access to its own devices plus read access to its configured
+   sensor devices' `state` topics:
+   ```toml
+   [[broker.clients]]
+   id        = "plugin.thermostat"
+   password  = "{bcrypt_hash}"
+   allow_pub = ["homecore/devices/thermostat_+/state",
+                "homecore/plugins/plugin.thermostat/+",
+                "homecore/devices/+/cmd"]
+   allow_sub = ["homecore/devices/thermostat_+/cmd",
+                "homecore/devices/+/state"]
+   ```
+   The `homecore/devices/+/state` subscription is intentionally broad —
+   thermostats are cross-device consumers by design.
+3. Add a `[[plugins]]` entry in your `homecore.toml` or `homecore.dev.toml`:
+   ```toml
+   [[plugins]]
+   id      = "plugin.thermostat"
+   binary  = "../plugins/hc-thermostat/target/debug/hc-thermostat"
+   config  = "../plugins/hc-thermostat/config/config.dev.toml"
+   enabled = true
+   ```
+4. `cargo build` (or `just build-release` for production).
+
+## Configuration
+
+Key fields per `[[thermostat]]` block:
+
+- `sensor_device_ids` — list of device IDs to read temperature from
+- `sensor_attribute` — attribute name on sensors (default `"temperature"`)
+- `aggregation` — `"average" | "min" | "max"` across sensors
+- `setpoint` — target temperature (unit matches sensors)
+- `hysteresis` — deadband width; actuator flips at setpoint ± hyst/2
+- `mode` — `"heat" | "cool" | "off"`
+- `actuator_device_id` — device to command on/off
+- `min_on_secs` / `min_off_secs` — short-cycle protection
+
+See `config/config.toml.example` for a complete example with comments.
+
+## Runtime commands
+
+Published to `homecore/devices/thermostat_<id>/cmd`:
+
+```json
+{ "command": "set_setpoint",    "value": 72.0 }
+{ "command": "set_mode",        "value": "heat" | "cool" | "off" }
+{ "command": "set_hysteresis",  "value": 1.0 }
+{ "command": "set_aggregation", "value": "average" | "min" | "max" }
+{ "command": "set_short_cycle", "min_on_secs": 300, "min_off_secs": 180 }
+{ "command": "recalculate" }
+```
+
+Runtime changes are persisted to `config.toml` so restarts are idempotent.
+
+## Management commands
+
+Via `POST /api/v1/plugins/plugin.thermostat/command`:
+
+- `{ "action": "recalculate_all" }` — re-evaluate every thermostat
+- `{ "action": "reload_config" }` — re-read `config.toml` from disk
+
+## Published state
+
+Each thermostat publishes to `homecore/devices/thermostat_<id>/state`:
+
+```json
+{
+  "current_temperature": 71.2,
+  "call_for": "heat" | "cool" | "idle" | "stale",
+  "actuator_state": true,
+  "actuator_last_change": "2026-04-19T12:34:56Z",
+  "pending_call": null,
+  "lockout_until": null,
+  "setpoint": 70.0,
+  "hysteresis": 1.0,
+  "mode": "heat",
+  "aggregation": "average",
+  "sensor_ids": [...],
+  "sensor_attribute": "temperature",
+  "actuator_device_id": "switch_furnace_relay",
+  "min_on_secs": 300,
+  "min_off_secs": 180,
+  "last_update": "2026-04-19T12:34:56Z"
+}
+```
+
+## License
+
+Dual-licensed under MIT or Apache-2.0.
