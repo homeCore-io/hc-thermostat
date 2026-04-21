@@ -14,6 +14,33 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
+/// Interpret an actuator's state payload as on/off. Tries common fields in
+/// priority order: `on` → `state` → `power`. Returns None if no recognised
+/// on/off attribute is present.
+pub(crate) fn interpret_actuator_on(payload: &Value) -> Option<bool> {
+    if let Some(b) = payload.get("on").and_then(|v| v.as_bool()) {
+        return Some(b);
+    }
+    if let Some(s) = payload.get("state").and_then(|v| v.as_str()) {
+        match s.to_ascii_lowercase().as_str() {
+            "on" | "true" | "1" => return Some(true),
+            "off" | "false" | "0" => return Some(false),
+            _ => {}
+        }
+    }
+    if let Some(b) = payload.get("power").and_then(|v| v.as_bool()) {
+        return Some(b);
+    }
+    if let Some(s) = payload.get("power").and_then(|v| v.as_str()) {
+        match s.to_ascii_lowercase().as_str() {
+            "on" | "true" | "1" => return Some(true),
+            "off" | "false" | "0" => return Some(false),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Per-thermostat runtime state — what we've last published.
 #[derive(Debug, Clone)]
 struct Runtime {
@@ -54,7 +81,12 @@ impl Runtime {
 
     /// Build the full state payload published to homecore/devices/{id}/state.
     fn state_payload(&self) -> Value {
-        let ids: Vec<&str> = self.cfg.sensor_device_ids.iter().map(|s| s.as_str()).collect();
+        let ids: Vec<&str> = self
+            .cfg
+            .sensor_device_ids
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         json!({
             "sensor_ids": ids,
             "sensor_attribute": self.cfg.sensor_attribute,
@@ -90,6 +122,10 @@ pub struct Bridge {
     /// `sensor_attribute`).
     sensor_cache: HashMap<String, f64>,
     config_path: String,
+    /// Device IDs we're still waiting on for their first post-subscribe state
+    /// message during startup sync. `None` after initial sync completes or
+    /// times out.
+    sync_pending: Option<std::collections::HashSet<String>>,
 }
 
 pub struct BridgeHandle {
@@ -102,6 +138,10 @@ pub struct BridgeHandle {
     /// (`get_thermostats`) which must answer synchronously without blocking
     /// the MQTT event loop.
     snapshot: Arc<std::sync::Mutex<Vec<Value>>>,
+    /// Notified whenever a state message drains a pending entry from
+    /// `sync_pending`. The initial-sync waiter uses this to exit early once
+    /// all expected state has arrived.
+    sync_notify: Arc<tokio::sync::Notify>,
 }
 
 impl BridgeHandle {
@@ -122,6 +162,7 @@ impl BridgeHandle {
             thermostats,
             sensor_cache: HashMap::new(),
             config_path: config_path.to_string(),
+            sync_pending: None,
         };
         let handle = Self {
             inner: Arc::new(Mutex::new(bridge)),
@@ -129,9 +170,76 @@ impl BridgeHandle {
             mqtt,
             plugin_id: cfg.homecore.plugin_id.clone(),
             snapshot,
+            sync_notify: Arc::new(tokio::sync::Notify::new()),
         };
         handle.refresh_snapshot().await;
         Ok(handle)
+    }
+
+    /// Seed the startup-sync tracker with the full set of external and own
+    /// device IDs we've subscribed to. Must be called before any subscriber
+    /// starts receiving retained messages so we don't miss markings.
+    pub async fn begin_initial_sync(&self, expected_ids: Vec<String>) {
+        let mut b = self.inner.lock().await;
+        b.sync_pending = Some(expected_ids.into_iter().collect());
+    }
+
+    /// Block until either all expected state messages have been received or
+    /// `max_wait` elapses. Returns the number of IDs that never reported.
+    pub async fn wait_for_initial_sync(&self, max_wait: std::time::Duration) -> usize {
+        let deadline = tokio::time::Instant::now() + max_wait;
+        loop {
+            let remaining_count = {
+                let b = self.inner.lock().await;
+                b.sync_pending.as_ref().map(|s| s.len()).unwrap_or(0)
+            };
+            if remaining_count == 0 {
+                break;
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let notify = self.sync_notify.clone();
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep(left) => break,
+            }
+        }
+        let missed: Vec<String> = {
+            let mut b = self.inner.lock().await;
+            let missed = b
+                .sync_pending
+                .as_ref()
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            b.sync_pending = None;
+            missed
+        };
+        if !missed.is_empty() {
+            warn!(
+                missing = ?missed,
+                count = missed.len(),
+                "Initial sync: not all subscribed devices reported retained state before timeout"
+            );
+        }
+        missed.len()
+    }
+
+    /// Record that we've seen a state message for `device_id`. Drains the
+    /// pending set and notifies the waiter when the set becomes empty. No-op
+    /// if initial sync has already completed.
+    async fn mark_sync_received(&self, device_id: &str) {
+        let drained = {
+            let mut b = self.inner.lock().await;
+            match &mut b.sync_pending {
+                Some(set) => set.remove(device_id),
+                None => false,
+            }
+        };
+        if drained {
+            self.sync_notify.notify_waiters();
+        }
     }
 
     /// Rebuild the sync-readable snapshot after any config mutation.
@@ -196,6 +304,41 @@ impl BridgeHandle {
         set.into_iter().collect()
     }
 
+    /// Return the union of all configured actuator device IDs across all
+    /// thermostats. Empty actuator_device_id entries are skipped.
+    pub async fn all_actuator_ids(&self) -> Vec<String> {
+        let b = self.inner.lock().await;
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in b.thermostats.values() {
+            if !r.cfg.actuator_device_id.is_empty() {
+                set.insert(r.cfg.actuator_device_id.clone());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// For an external device_id (neither a thermostat of ours nor an own
+    /// retained state), classify whether it's being used as an actuator
+    /// and/or a sensor by any configured thermostat. A single id can serve
+    /// as both in principle.
+    pub async fn classify_external(&self, device_id: &str) -> (bool, bool) {
+        let b = self.inner.lock().await;
+        let mut is_act = false;
+        let mut is_sensor = false;
+        for rt in b.thermostats.values() {
+            if rt.cfg.actuator_device_id == device_id {
+                is_act = true;
+            }
+            if rt.cfg.sensor_device_ids.iter().any(|s| s == device_id) {
+                is_sensor = true;
+            }
+            if is_act && is_sensor {
+                break;
+            }
+        }
+        (is_act, is_sensor)
+    }
+
     /// Incoming state message on one of OUR thermostat device topics. Called
     /// at startup via retained-message replay to restore `actuator_last_change`
     /// (and therefore short-cycle lockout windows) across plugin restarts.
@@ -203,6 +346,7 @@ impl BridgeHandle {
     /// Safe to be called after we've already started publishing fresh state —
     /// we only apply the retained fields if they weren't already overwritten.
     pub async fn on_own_state_restored(&self, device_id: &str, payload: Value) {
+        self.mark_sync_received(device_id).await;
         let Some(therm_id) = device_id.strip_prefix("thermostat_") else {
             return;
         };
@@ -232,8 +376,50 @@ impl BridgeHandle {
         debug!(device_id, "Restored runtime state from retained message");
     }
 
+    /// Incoming state message from an actuator device. Detects drift between
+    /// our internal tracking and the observed reality — e.g. an external
+    /// command (UI, rule, voice) flipped the actuator behind our back, or a
+    /// prior thermostat command was never applied. When drift is detected,
+    /// we update internal state to match reality and recalculate, which will
+    /// re-issue the correct command if desired state still differs.
+    pub async fn on_actuator_state(&self, device_id: &str, payload: Value) {
+        self.mark_sync_received(device_id).await;
+        let Some(observed) = interpret_actuator_on(&payload) else {
+            debug!(device_id, "Actuator state has no recognised on/off field");
+            return;
+        };
+
+        let drifted: Vec<String> = {
+            let mut b = self.inner.lock().await;
+            let mut drifted = Vec::new();
+            for rt in b.thermostats.values_mut() {
+                if rt.cfg.actuator_device_id == device_id && rt.actuator_state != observed {
+                    warn!(
+                        actuator = device_id,
+                        thermostat = %rt.cfg.id,
+                        observed,
+                        internal = rt.actuator_state,
+                        "Actuator state drift detected — updating internal tracking"
+                    );
+                    rt.actuator_state = observed;
+                    // Treat the external transition as a change we observed now;
+                    // this keeps short-cycle protection honest against the new
+                    // physical state.
+                    rt.actuator_last_change = Some(Utc::now());
+                    drifted.push(rt.cfg.id.clone());
+                }
+            }
+            drifted
+        };
+
+        for id in drifted {
+            self.recalculate(&id).await;
+        }
+    }
+
     /// Incoming state message from an external sensor device.
     pub async fn on_sensor_state(&self, sensor_id: &str, payload: Value) {
+        self.mark_sync_received(sensor_id).await;
         // Extract the configured attribute — the attribute name is per-thermostat,
         // but the common case is "temperature".
         let attrs: Vec<String> = {
@@ -280,21 +466,32 @@ impl BridgeHandle {
         let Some(therm_id) = device_id.strip_prefix("thermostat_") else {
             return;
         };
-        let cmd = payload.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let cmd = payload
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         debug!(device_id, cmd, "Thermostat command");
 
-        // Sensor set changes need a sub/unsub diff against the union of all
-        // thermostats' sensor sets AFTER the update. Collect those outside the
-        // lock so we can await subscribe_state/unsubscribe_state cleanly.
+        // Sensor and actuator set changes need a sub/unsub diff against the
+        // union of all thermostats' sensor/actuator sets AFTER the update.
+        // Collect those outside the lock so we can await subscribe_state /
+        // unsubscribe_state cleanly.
         let mut changed = false;
         let mut sensor_diff: Option<(Vec<String>, Vec<String>)> = None;
+        let mut actuator_diff: Option<(Vec<String>, Vec<String>)> = None;
         {
             let mut b = self.inner.lock().await;
-            // Snapshot global sensor union BEFORE mutation.
-            let old_union: std::collections::HashSet<String> = b
+            // Snapshot global sensor/actuator unions BEFORE mutation.
+            let old_sensor_union: std::collections::HashSet<String> = b
                 .thermostats
                 .values()
                 .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
+                .collect();
+            let old_actuator_union: std::collections::HashSet<String> = b
+                .thermostats
+                .values()
+                .filter(|r| !r.cfg.actuator_device_id.is_empty())
+                .map(|r| r.cfg.actuator_device_id.clone())
                 .collect();
 
             let Some(rt) = b.thermostats.get_mut(therm_id) else {
@@ -377,20 +574,44 @@ impl BridgeHandle {
                 }
             }
 
-            // Snapshot NEW global sensor union and compute diff.
-            let new_union: std::collections::HashSet<String> = b
+            // Snapshot NEW global sensor/actuator unions and compute diffs.
+            let new_sensor_union: std::collections::HashSet<String> = b
                 .thermostats
                 .values()
                 .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
                 .collect();
-            if old_union != new_union {
-                let added: Vec<String> = new_union.difference(&old_union).cloned().collect();
-                let removed: Vec<String> = old_union.difference(&new_union).cloned().collect();
+            if old_sensor_union != new_sensor_union {
+                let added: Vec<String> = new_sensor_union
+                    .difference(&old_sensor_union)
+                    .cloned()
+                    .collect();
+                let removed: Vec<String> = old_sensor_union
+                    .difference(&new_sensor_union)
+                    .cloned()
+                    .collect();
                 sensor_diff = Some((added, removed));
+            }
+
+            let new_actuator_union: std::collections::HashSet<String> = b
+                .thermostats
+                .values()
+                .filter(|r| !r.cfg.actuator_device_id.is_empty())
+                .map(|r| r.cfg.actuator_device_id.clone())
+                .collect();
+            if old_actuator_union != new_actuator_union {
+                let added: Vec<String> = new_actuator_union
+                    .difference(&old_actuator_union)
+                    .cloned()
+                    .collect();
+                let removed: Vec<String> = old_actuator_union
+                    .difference(&new_actuator_union)
+                    .cloned()
+                    .collect();
+                actuator_diff = Some((added, removed));
             }
         }
 
-        // Apply subscription diff outside the lock.
+        // Apply subscription diffs outside the lock.
         if let Some((added, removed)) = sensor_diff {
             for sid in &added {
                 if let Err(e) = self.publisher.subscribe_state(sid).await {
@@ -400,6 +621,18 @@ impl BridgeHandle {
             for sid in &removed {
                 if let Err(e) = self.publisher.unsubscribe_state(sid).await {
                     warn!(sensor = %sid, error = %e, "set_sensors: unsubscribe failed");
+                }
+            }
+        }
+        if let Some((added, removed)) = actuator_diff {
+            for aid in &added {
+                if let Err(e) = self.publisher.subscribe_state(aid).await {
+                    warn!(actuator = %aid, error = %e, "set_actuator: subscribe failed");
+                }
+            }
+            for aid in &removed {
+                if let Err(e) = self.publisher.unsubscribe_state(aid).await {
+                    warn!(actuator = %aid, error = %e, "set_actuator: unsubscribe failed");
                 }
             }
         }
@@ -481,16 +714,20 @@ impl BridgeHandle {
                     rt.call_for = new_call.to_string();
                     None
                 } else if desired_act != rt.actuator_state {
+                    // Default command shape matches the HomeCore Binary Switch
+                    // convention (`on` attribute) used by hc-zwave, hc-hue,
+                    // hc-wled, etc. Users with non-standard actuators override
+                    // via actuator_on_cmd / actuator_off_cmd in config.
                     let payload = if desired_act {
                         rt.cfg
                             .actuator_on_cmd
                             .clone()
-                            .unwrap_or_else(|| json!({"command": "on"}))
+                            .unwrap_or_else(|| json!({"on": true}))
                     } else {
                         rt.cfg
                             .actuator_off_cmd
                             .clone()
-                            .unwrap_or_else(|| json!({"command": "off"}))
+                            .unwrap_or_else(|| json!({"on": false}))
                     };
                     rt.actuator_state = desired_act;
                     rt.actuator_last_change = Some(now);
@@ -516,7 +753,11 @@ impl BridgeHandle {
         };
 
         // 5. Publish updated state.
-        if let Err(e) = self.publisher.publish_state(&device_id, &state_payload).await {
+        if let Err(e) = self
+            .publisher
+            .publish_state(&device_id, &state_payload)
+            .await
+        {
             warn!(device_id, error = %e, "Failed to publish thermostat state");
         }
 
@@ -554,7 +795,10 @@ impl BridgeHandle {
 
             // Record the outcome on the thermostat's runtime state + re-publish
             // device state so the UI sees it.
-            let therm_id = device_id.strip_prefix("thermostat_").unwrap_or("").to_string();
+            let therm_id = device_id
+                .strip_prefix("thermostat_")
+                .unwrap_or("")
+                .to_string();
             if !therm_id.is_empty() {
                 let updated_payload = {
                     let mut b = self.inner.lock().await;
@@ -650,7 +894,10 @@ impl BridgeHandle {
             return Err(anyhow::anyhow!("invalid mode: {}", entry.mode));
         }
         if !matches!(entry.aggregation.as_str(), "average" | "min" | "max") {
-            return Err(anyhow::anyhow!("invalid aggregation: {}", entry.aggregation));
+            return Err(anyhow::anyhow!(
+                "invalid aggregation: {}",
+                entry.aggregation
+            ));
         }
         if entry.hysteresis < 0.0 {
             return Err(anyhow::anyhow!("hysteresis must be non-negative"));
@@ -661,29 +908,54 @@ impl BridgeHandle {
         let display_name = entry.name.clone();
 
         let sensor_added: Vec<String>;
+        let actuator_added: Vec<String>;
         {
             let mut b = self.inner.lock().await;
             if b.thermostats.contains_key(&therm_id) {
                 return Err(anyhow::anyhow!("thermostat already exists: {therm_id}"));
             }
-            let old_union: std::collections::HashSet<String> = b
+            let old_sensor_union: std::collections::HashSet<String> = b
                 .thermostats
                 .values()
                 .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
+                .collect();
+            let old_actuator_union: std::collections::HashSet<String> = b
+                .thermostats
+                .values()
+                .filter(|r| !r.cfg.actuator_device_id.is_empty())
+                .map(|r| r.cfg.actuator_device_id.clone())
                 .collect();
             b.thermostats.insert(therm_id.clone(), Runtime::new(entry));
-            let new_union: std::collections::HashSet<String> = b
+            let new_sensor_union: std::collections::HashSet<String> = b
                 .thermostats
                 .values()
                 .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
                 .collect();
-            sensor_added = new_union.difference(&old_union).cloned().collect();
+            let new_actuator_union: std::collections::HashSet<String> = b
+                .thermostats
+                .values()
+                .filter(|r| !r.cfg.actuator_device_id.is_empty())
+                .map(|r| r.cfg.actuator_device_id.clone())
+                .collect();
+            sensor_added = new_sensor_union
+                .difference(&old_sensor_union)
+                .cloned()
+                .collect();
+            actuator_added = new_actuator_union
+                .difference(&old_actuator_union)
+                .cloned()
+                .collect();
         }
 
-        // Subscribe to new sensors.
+        // Subscribe to new sensors and actuators.
         for sid in &sensor_added {
             if let Err(e) = self.publisher.subscribe_state(sid).await {
                 warn!(sensor = %sid, error = %e, "add_thermostat: subscribe failed");
+            }
+        }
+        for aid in &actuator_added {
+            if let Err(e) = self.publisher.subscribe_state(aid).await {
+                warn!(actuator = %aid, error = %e, "add_thermostat: subscribe actuator failed");
             }
         }
 
@@ -692,7 +964,9 @@ impl BridgeHandle {
             .register_device_full(&device_id, &display_name, Some("thermostat"), None, None)
             .await?;
         self.publisher.subscribe_commands(&device_id).await?;
-        self.publisher.publish_availability(&device_id, true).await?;
+        self.publisher
+            .publish_availability(&device_id, true)
+            .await?;
 
         // Persist + initial recalc.
         self.persist_config().await?;
@@ -700,11 +974,13 @@ impl BridgeHandle {
         Ok(therm_id)
     }
 
-    /// Remove a thermostat. Unsubscribes orphan sensors (sensors no longer
-    /// referenced by any other thermostat), drops the device, persists config.
+    /// Remove a thermostat. Unsubscribes orphan sensors and actuators (those
+    /// no longer referenced by any other thermostat), drops the device,
+    /// persists config.
     pub async fn remove_thermostat(&self, therm_id: &str) -> Result<()> {
         let device_id = format!("thermostat_{therm_id}");
         let sensors_removed: Vec<String>;
+        let actuators_removed: Vec<String>;
         {
             let mut b = self.inner.lock().await;
             if !b.thermostats.contains_key(therm_id) {
@@ -719,19 +995,45 @@ impl BridgeHandle {
                 .iter()
                 .cloned()
                 .collect();
+            let this_actuator: Option<String> = {
+                let a = &b.thermostats.get(therm_id).unwrap().cfg.actuator_device_id;
+                if a.is_empty() {
+                    None
+                } else {
+                    Some(a.clone())
+                }
+            };
             b.thermostats.remove(therm_id);
-            // Any sensor no longer used by remaining thermostats is orphan.
-            let still_used: std::collections::HashSet<String> = b
+            // Anything no longer referenced by remaining thermostats is orphan.
+            let still_used_sensors: std::collections::HashSet<String> = b
                 .thermostats
                 .values()
                 .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
                 .collect();
-            sensors_removed = removed_sensors.difference(&still_used).cloned().collect();
+            let still_used_actuators: std::collections::HashSet<String> = b
+                .thermostats
+                .values()
+                .filter(|r| !r.cfg.actuator_device_id.is_empty())
+                .map(|r| r.cfg.actuator_device_id.clone())
+                .collect();
+            sensors_removed = removed_sensors
+                .difference(&still_used_sensors)
+                .cloned()
+                .collect();
+            actuators_removed = this_actuator
+                .filter(|a| !still_used_actuators.contains(a))
+                .into_iter()
+                .collect();
         }
 
         for sid in &sensors_removed {
             if let Err(e) = self.publisher.unsubscribe_state(sid).await {
                 warn!(sensor = %sid, error = %e, "remove_thermostat: unsubscribe failed");
+            }
+        }
+        for aid in &actuators_removed {
+            if let Err(e) = self.publisher.unsubscribe_state(aid).await {
+                warn!(actuator = %aid, error = %e, "remove_thermostat: unsubscribe actuator failed");
             }
         }
 
@@ -775,21 +1077,50 @@ impl BridgeHandle {
         let new_cfg = Config::load(&path)?;
         let added_sensors: Vec<String>;
         let removed_sensors: Vec<String>;
+        let added_actuators: Vec<String>;
+        let removed_actuators: Vec<String>;
 
         {
             let mut b = self.inner.lock().await;
-            let old_set: std::collections::HashSet<String> = b
+            let old_sensor_set: std::collections::HashSet<String> = b
                 .thermostats
                 .values()
                 .flat_map(|r| r.cfg.sensor_device_ids.iter().cloned())
                 .collect();
-            let new_set: std::collections::HashSet<String> = new_cfg
+            let new_sensor_set: std::collections::HashSet<String> = new_cfg
                 .thermostats
                 .iter()
                 .flat_map(|t| t.sensor_device_ids.iter().cloned())
                 .collect();
-            added_sensors = new_set.difference(&old_set).cloned().collect();
-            removed_sensors = old_set.difference(&new_set).cloned().collect();
+            added_sensors = new_sensor_set
+                .difference(&old_sensor_set)
+                .cloned()
+                .collect();
+            removed_sensors = old_sensor_set
+                .difference(&new_sensor_set)
+                .cloned()
+                .collect();
+
+            let old_actuator_set: std::collections::HashSet<String> = b
+                .thermostats
+                .values()
+                .filter(|r| !r.cfg.actuator_device_id.is_empty())
+                .map(|r| r.cfg.actuator_device_id.clone())
+                .collect();
+            let new_actuator_set: std::collections::HashSet<String> = new_cfg
+                .thermostats
+                .iter()
+                .filter(|t| !t.actuator_device_id.is_empty())
+                .map(|t| t.actuator_device_id.clone())
+                .collect();
+            added_actuators = new_actuator_set
+                .difference(&old_actuator_set)
+                .cloned()
+                .collect();
+            removed_actuators = old_actuator_set
+                .difference(&new_actuator_set)
+                .cloned()
+                .collect();
 
             // Upsert thermostat configs. Preserve runtime state when the
             // thermostat id already exists.
@@ -801,7 +1132,7 @@ impl BridgeHandle {
             }
         }
 
-        // Apply subscription diff via the publisher so the shared
+        // Apply subscription diffs via the publisher so the shared
         // SubscriptionTracker is updated — subscriptions survive reconnects.
         for sid in &added_sensors {
             if let Err(e) = self.publisher.subscribe_state(sid).await {
@@ -813,10 +1144,22 @@ impl BridgeHandle {
                 warn!(sensor = %sid, error = %e, "Reload: unsubscribe_state failed");
             }
         }
+        for aid in &added_actuators {
+            if let Err(e) = self.publisher.subscribe_state(aid).await {
+                warn!(actuator = %aid, error = %e, "Reload: actuator subscribe failed");
+            }
+        }
+        for aid in &removed_actuators {
+            if let Err(e) = self.publisher.unsubscribe_state(aid).await {
+                warn!(actuator = %aid, error = %e, "Reload: actuator unsubscribe failed");
+            }
+        }
 
         info!(
-            added = added_sensors.len(),
-            removed = removed_sensors.len(),
+            added_sensors = added_sensors.len(),
+            removed_sensors = removed_sensors.len(),
+            added_actuators = added_actuators.len(),
+            removed_actuators = removed_actuators.len(),
             "Config reloaded"
         );
         self.refresh_snapshot().await;
@@ -831,14 +1174,51 @@ impl BridgeHandle {
 pub enum BridgeTask {
     RecalculateAll,
     ReloadConfig,
-    AddThermostat {
-        entry: Box<ThermostatEntry>,
-    },
-    RemoveThermostat {
-        id: String,
-    },
+    AddThermostat { entry: Box<ThermostatEntry> },
+    RemoveThermostat { id: String },
 }
 
 pub fn bridge_task_channel() -> (mpsc::Sender<BridgeTask>, mpsc::Receiver<BridgeTask>) {
     mpsc::channel(16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interpret_actuator_on;
+    use serde_json::json;
+
+    #[test]
+    fn interprets_on_bool() {
+        assert_eq!(interpret_actuator_on(&json!({"on": true})), Some(true));
+        assert_eq!(interpret_actuator_on(&json!({"on": false})), Some(false));
+    }
+
+    #[test]
+    fn interprets_state_string() {
+        assert_eq!(interpret_actuator_on(&json!({"state": "on"})), Some(true));
+        assert_eq!(interpret_actuator_on(&json!({"state": "ON"})), Some(true));
+        assert_eq!(interpret_actuator_on(&json!({"state": "off"})), Some(false));
+        assert_eq!(interpret_actuator_on(&json!({"state": "OFF"})), Some(false));
+    }
+
+    #[test]
+    fn interprets_power_variants() {
+        assert_eq!(interpret_actuator_on(&json!({"power": true})), Some(true));
+        assert_eq!(interpret_actuator_on(&json!({"power": "on"})), Some(true));
+        assert_eq!(interpret_actuator_on(&json!({"power": "off"})), Some(false));
+    }
+
+    #[test]
+    fn on_takes_priority_over_state() {
+        // If both are present, `on` wins.
+        let v = json!({"on": false, "state": "on"});
+        assert_eq!(interpret_actuator_on(&v), Some(false));
+    }
+
+    #[test]
+    fn unrecognised_payload_returns_none() {
+        assert_eq!(interpret_actuator_on(&json!({})), None);
+        assert_eq!(interpret_actuator_on(&json!({"brightness": 128})), None);
+        assert_eq!(interpret_actuator_on(&json!({"state": "dimmed"})), None);
+    }
 }

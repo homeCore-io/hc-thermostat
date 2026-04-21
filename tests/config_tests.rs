@@ -9,10 +9,10 @@ use tempfile::NamedTempFile;
 
 // Re-declare the plugin modules here so tests can call into them without a
 // lib target. `config.rs` depends on `logging::LoggingConfig`, so include both.
-#[path = "../src/logging.rs"]
-mod logging;
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/logging.rs"]
+mod logging;
 
 fn write_config(content: &str) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();

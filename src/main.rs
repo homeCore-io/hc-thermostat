@@ -20,11 +20,7 @@ async fn main() {
     // Accept either `hc-thermostat --config PATH` or `hc-thermostat PATH`.
     // Default to `config/config.toml` (relative to the working directory).
     let config_path = parse_flag("--config")
-        .or_else(|| {
-            std::env::args()
-                .nth(1)
-                .filter(|a| !a.starts_with("--"))
-        })
+        .or_else(|| std::env::args().nth(1).filter(|a| !a.starts_with("--")))
         .unwrap_or_else(|| "config/config.toml".to_string());
 
     // Load [logging] bootstrap first so file logging is up before config
@@ -154,7 +150,9 @@ async fn run(
                 };
                 let id = entry.id.clone();
                 if bridge_tx_for_mgmt
-                    .try_send(BridgeTask::AddThermostat { entry: Box::new(entry) })
+                    .try_send(BridgeTask::AddThermostat {
+                        entry: Box::new(entry),
+                    })
                     .is_err()
                 {
                     return Some(serde_json::json!({
@@ -215,7 +213,24 @@ async fn run(
             warn!(sensor = %sid, error = %e, "Failed to subscribe to sensor state");
         }
     }
-    info!(sensor_count = sensor_ids.len(), "Subscribed to sensor state topics");
+    info!(
+        sensor_count = sensor_ids.len(),
+        "Subscribed to sensor state topics"
+    );
+
+    // 6a. Subscribe to actuator state topics so we can detect drift — e.g.
+    // when the actuator is flipped by an external rule, UI command, voice
+    // assistant, or a prior command from us that never landed.
+    let actuator_ids = bridge.all_actuator_ids().await;
+    for aid in &actuator_ids {
+        if let Err(e) = client.subscribe_state(aid).await {
+            warn!(actuator = %aid, error = %e, "Failed to subscribe to actuator state");
+        }
+    }
+    info!(
+        actuator_count = actuator_ids.len(),
+        "Subscribed to actuator state topics"
+    );
 
     // 6b. Subscribe to OUR OWN thermostat state topics so retained state from
     // the previous run is replayed — restores actuator_last_change across
@@ -226,6 +241,21 @@ async fn run(
             warn!(device_id = %id, error = %e, "Failed to subscribe to own state");
         }
     }
+
+    // 6c. Prime the initial-sync tracker with every id we just subscribed to.
+    // State callbacks (spawned after run_managed starts) drain the set as
+    // retained messages arrive. The startup recalc then blocks on drain or
+    // timeout so the first control pass sees real sensor readings and real
+    // actuator state, not cold defaults.
+    let mut expected_ids: Vec<String> =
+        Vec::with_capacity(sensor_ids.len() + actuator_ids.len() + own_ids.len());
+    expected_ids.extend(sensor_ids.iter().cloned());
+    expected_ids.extend(actuator_ids.iter().cloned());
+    expected_ids.extend(own_ids.iter().cloned());
+    expected_ids.sort();
+    expected_ids.dedup();
+    let expected_total = expected_ids.len();
+    bridge.begin_initial_sync(expected_ids).await;
 
     // 7. Spawn run_managed BEFORE registering devices (critical SDK invariant).
     let bridge_for_cmd = Arc::clone(&bridge);
@@ -244,7 +274,15 @@ async fn run(
         tokio::spawn(async move {
             if source_id.starts_with("thermostat_") {
                 b.on_own_state_restored(&source_id, payload).await;
-            } else {
+                return;
+            }
+            // An external id may be a sensor, an actuator, or (rarely) both.
+            // Dispatch to every applicable handler.
+            let (is_actuator, is_sensor) = b.classify_external(&source_id).await;
+            if is_actuator {
+                b.on_actuator_state(&source_id, payload.clone()).await;
+            }
+            if is_sensor {
                 b.on_sensor_state(&source_id, payload).await;
             }
         });
@@ -256,9 +294,20 @@ async fn run(
         }
     });
 
-    // 8. Settle — let MQTT connect + subscriptions establish + retained
-    //    messages arrive before we run the first recalc.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // 8. Wait for retained state on every subscribed topic, or a bounded
+    //    timeout if some devices don't publish retained state. This ensures
+    //    the startup recalc below sees the actual current temperature +
+    //    actuator state, not cold defaults.
+    let sync_start = std::time::Instant::now();
+    let missed = bridge
+        .wait_for_initial_sync(std::time::Duration::from_secs(5))
+        .await;
+    info!(
+        expected = expected_total,
+        missed,
+        elapsed_ms = sync_start.elapsed().as_millis() as u64,
+        "Initial state sync complete"
+    );
 
     // 9. Register devices.
     bridge.register_all().await?;

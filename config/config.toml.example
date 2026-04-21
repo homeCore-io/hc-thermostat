@@ -35,8 +35,8 @@ log_forward_level  = "info"       # minimum level forwarded to HomeCore via MQTT
 #   actuator_device_id HomeCore device to command on/off
 #   min_on_secs        short-cycle protection — min time between OFF→ON→OFF
 #   min_off_secs       short-cycle protection — min time between ON→OFF→ON
-#   actuator_on_cmd    optional override (default { command = "on" })
-#   actuator_off_cmd   optional override (default { command = "off" })
+#   actuator_on_cmd    optional override (default { on = true })
+#   actuator_off_cmd   optional override (default { on = false })
 
 [[thermostat]]
 id                 = "living_room"
