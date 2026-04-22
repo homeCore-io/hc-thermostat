@@ -341,6 +341,9 @@ pub fn init_logging(
     } else {
         cfg.level.clone()
     };
+    // Prepend noise-suppression defaults (rumqttc Pingreq spam etc.); user
+    // directives layered after so they win on conflict.
+    let initial_directives = hc_logging::with_noise_suppression(&initial_directives);
 
     let global_filter: EnvFilter = initial_directives
         .parse()
