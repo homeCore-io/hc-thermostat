@@ -32,6 +32,15 @@ to heat/cool/off mode. Optional short-cycle protection (`min_on_secs` /
    ```
    The `homecore/devices/+/state` subscription is intentionally broad —
    thermostats are cross-device consumers by design.
+
+   > **ACL enforcement note:** on the default embedded rumqttd broker these
+   > patterns are metadata only — connection credentials are checked, but
+   > per-topic ACLs are not. Deployments that need real topic isolation
+   > (containers, third-party plugins, compliance) should run HomeCore
+   > against an external Mosquitto broker. See `mqttAuthzPlan.md` for the
+   > deploy recipe; `hc-cli broker generate-mosquitto-config` converts the
+   > same `allow_pub` / `allow_sub` patterns above into a Mosquitto ACL
+   > file that _is_ enforced.
 3. Add a `[[plugins]]` entry in your `homecore.toml` or `homecore.dev.toml`:
    ```toml
    [[plugins]]
