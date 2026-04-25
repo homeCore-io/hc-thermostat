@@ -190,6 +190,51 @@ async fn run(
                 Some(serde_json::json!({ "status": "ok", "thermostats": list }))
             }
             _ => None,
+        })
+        .with_capabilities(hc_types::Capabilities {
+            spec: "1".into(),
+            // SDK fills plugin_id from the configured client id.
+            plugin_id: String::new(),
+            actions: vec![
+                hc_types::Action {
+                    id: "recalculate_all".into(),
+                    label: "Recalculate all".into(),
+                    description: Some(
+                        "Re-evaluate every thermostat against its current sensor \
+                         readings. Useful after editing setpoints or sensor \
+                         topology by hand."
+                            .into(),
+                    ),
+                    params: None,
+                    result: None,
+                    stream: false,
+                    cancelable: false,
+                    concurrency: hc_types::Concurrency::default(),
+                    item_key: None,
+                    item_operations: None,
+                    requires_role: hc_types::RequiresRole::User,
+                    timeout_ms: None,
+                },
+                hc_types::Action {
+                    id: "reload_config".into(),
+                    label: "Reload config".into(),
+                    description: Some(
+                        "Re-read config.toml from disk and rebuild the \
+                         thermostat set. Subscriptions are re-established and a \
+                         recalculate is scheduled."
+                            .into(),
+                    ),
+                    params: None,
+                    result: None,
+                    stream: false,
+                    cancelable: false,
+                    concurrency: hc_types::Concurrency::default(),
+                    item_key: None,
+                    item_operations: None,
+                    requires_role: hc_types::RequiresRole::User,
+                    timeout_ms: None,
+                },
+            ],
         });
 
     // 5. Create bridge + device publisher handle.
