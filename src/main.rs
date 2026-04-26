@@ -90,7 +90,13 @@ async fn run(
         plugin_id: cfg.homecore.plugin_id.clone(),
         password: cfg.homecore.password.clone(),
     };
-    let client = PluginClient::connect(sdk_config).await?;
+    let client = PluginClient::connect(sdk_config)
+        .await?
+        // Cross-restart device tracking: SDK mirrors every register/
+        // unregister to disk so `bridge.register_all`'s reconcile call
+        // can clean up thermostats removed from config while the
+        // plugin was offline.
+        .with_device_persistence(published_ids_path(&config_path));
 
     // 2. Activate MQTT log forwarding now that we're connected.
     mqtt_log_handle.connect(
@@ -409,4 +415,13 @@ async fn run(
 
     run_handle.abort();
     Ok(())
+}
+
+/// Path of the cross-restart device-id snapshot, sibling to
+/// config.toml. Owned by the SDK device tracker.
+fn published_ids_path(config_path: &str) -> std::path::PathBuf {
+    std::path::Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".published-device-ids.json")
 }

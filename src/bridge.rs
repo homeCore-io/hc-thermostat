@@ -283,6 +283,12 @@ impl BridgeHandle {
                 self.publisher.publish_state(id, &payload).await?;
             }
         }
+        // Reconcile against the SDK-tracked set: anything from a prior
+        // session that's no longer in [[thermostats]] gets unregistered.
+        let live: std::collections::HashSet<String> = ids.iter().cloned().collect();
+        if let Err(e) = self.publisher.reconcile_devices(live).await {
+            tracing::warn!(error = %e, "reconcile_devices failed");
+        }
         Ok(())
     }
 
