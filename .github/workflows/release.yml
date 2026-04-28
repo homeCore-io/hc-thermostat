@@ -14,4 +14,4 @@ jobs:
     with:
       binary_name: hc-thermostat
       config_example: config/config.toml.example
-      rust_version: "1.88"
+      rust_version: "stable"
