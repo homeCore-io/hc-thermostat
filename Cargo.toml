@@ -34,6 +34,8 @@ tempfile = "3"
 # Standalone repo — not part of the core workspace.
 [workspace]
 
+# Size-optimized release profile (matches homeCore-io/homeCore).
 [profile.release]
-strip = true
-lto   = "thin"
+strip         = "symbols"
+lto           = "thin"
+codegen-units = 1
