@@ -176,7 +176,7 @@ impl RotatingWriter {
         };
 
         if self.period_counter == 0 {
-            let candidate = self.dir.join(format!("{}.{}.log", self.prefix, period));
+            let candidate = self.dir.join(format!("{}.{period}.log", self.prefix));
             if !candidate.exists() {
                 return candidate;
             }
@@ -191,7 +191,7 @@ impl RotatingWriter {
         loop {
             let candidate = self
                 .dir
-                .join(format!("{}.{}.{}.log", self.prefix, period, n));
+                .join(format!("{}.{period}.{n}.log", self.prefix));
             if !candidate.exists() {
                 return candidate;
             }
@@ -216,7 +216,7 @@ impl Write for RotatingWriter {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn active_path(dir: &Path, prefix: &str) -> PathBuf {
-    dir.join(format!("{}.log", prefix))
+    dir.join(format!("{prefix}.log"))
 }
 
 fn open_append(path: &Path) -> io::Result<File> {
@@ -237,7 +237,7 @@ fn prune_old_logs(dir: &Path, prefix: &str, max_age_days: u32) {
     let cutoff = std::time::SystemTime::now()
         - std::time::Duration::from_secs(u64::from(max_age_days) * 86_400);
 
-    let rotated_prefix = format!("{}.", prefix);
+    let rotated_prefix = format!("{prefix}.");
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -283,7 +283,7 @@ fn compress_in_background(src: PathBuf) {
         })();
 
         if let Err(e) = result {
-            eprintln!("log compression failed for {:?}: {e}", src);
+            eprintln!("log compression failed for {src:?}: {e}");
         }
     });
 }
