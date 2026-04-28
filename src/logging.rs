@@ -189,9 +189,7 @@ impl RotatingWriter {
         };
         let mut n = start;
         loop {
-            let candidate = self
-                .dir
-                .join(format!("{}.{period}.{n}.log", self.prefix));
+            let candidate = self.dir.join(format!("{}.{period}.{n}.log", self.prefix));
             if !candidate.exists() {
                 return candidate;
             }
