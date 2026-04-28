@@ -9,9 +9,13 @@ use tempfile::NamedTempFile;
 
 // Re-declare the plugin modules here so tests can call into them without a
 // lib target. `config.rs` depends on `logging::LoggingConfig`, so include both.
+// Items only consumed by main.rs (RotatingWriter, init_logging, etc.) appear
+// dead in this compilation unit even though they aren't — allow that locally.
 #[path = "../src/config.rs"]
+#[allow(dead_code)]
 mod config;
 #[path = "../src/logging.rs"]
+#[allow(dead_code)]
 mod logging;
 
 fn write_config(content: &str) -> NamedTempFile {
