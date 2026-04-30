@@ -32,8 +32,6 @@ flate2             = "1"
 tempfile = "3"
 
 # Standalone repo — not part of the core workspace.
-[workspace]
-
 # Size-optimized release profile (matches homeCore-io/homeCore).
 [profile.release]
 strip         = "symbols"
