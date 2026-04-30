@@ -30,6 +30,3 @@ flate2             = "1"
 
 [dev-dependencies]
 tempfile = "3"
-
-# Standalone repo — not part of the core workspace.
-# Size-optimized release profile (matches homeCore-io/homeCore).
