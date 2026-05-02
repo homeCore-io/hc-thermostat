@@ -15,7 +15,7 @@ plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", 
 hc-types           = { git = "https://github.com/homeCore-io/homeCore", branch = "main" }
 hc-logging         = { git = "https://github.com/homeCore-io/homeCore", branch = "main" }
 tokio              = { version = "1",   features = ["full"] }
-rumqttc            = "0.24"
+rumqttc            = "0.25"
 serde              = { version = "1",   features = ["derive"] }
 serde_json         = "1"
 toml               = "0.8"
