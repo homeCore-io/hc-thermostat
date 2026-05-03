@@ -13,6 +13,10 @@ on:
         description: "Skip aarch64 to halve runtime (use for dev iteration; tag pushes always go multi-arch)."
         type: boolean
         default: true
+      refresh_deps:
+        description: "Run cargo update for in-org git deps (plugin-sdk-rs, hc-types, hc-logging, hc-time) before build. SDK fanout passes this so the rebuild actually carries new SDK code instead of the SHA Cargo.lock pins."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -28,3 +32,4 @@ jobs:
       publish_docker_image: true
       docker_repo_ref: develop  # remove once homeCore-io/docker is on main
       fast: ${{ inputs.fast || false }}
+      refresh_deps: ${{ inputs.refresh_deps || false }}
