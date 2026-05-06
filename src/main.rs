@@ -49,7 +49,7 @@ fn init_logging_bootstrap(
     config_path: &str,
 ) -> (
     tracing_appender::non_blocking::WorkerGuard,
-    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::logging::LogLevelHandle,
     plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) {
     #[derive(serde::Deserialize, Default)]
@@ -80,7 +80,7 @@ fn parse_flag(flag: &str) -> Option<String> {
 async fn run(
     cfg: Config,
     config_path: String,
-    log_level_handle: hc_logging::LogLevelHandle,
+    log_level_handle: plugin_sdk_rs::logging::LogLevelHandle,
     mqtt_log_handle: plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) -> Result<()> {
     // 1. Connect to broker.
@@ -197,12 +197,12 @@ async fn run(
             }
             _ => None,
         })
-        .with_capabilities(hc_types::Capabilities {
+        .with_capabilities(plugin_sdk_rs::types::Capabilities {
             spec: "1".into(),
             // SDK fills plugin_id from the configured client id.
             plugin_id: String::new(),
             actions: vec![
-                hc_types::Action {
+                plugin_sdk_rs::types::Action {
                     id: "recalculate_all".into(),
                     label: "Recalculate all".into(),
                     description: Some(
@@ -215,13 +215,13 @@ async fn run(
                     result: None,
                     stream: false,
                     cancelable: false,
-                    concurrency: hc_types::Concurrency::default(),
+                    concurrency: plugin_sdk_rs::types::Concurrency::default(),
                     item_key: None,
                     item_operations: None,
-                    requires_role: hc_types::RequiresRole::User,
+                    requires_role: plugin_sdk_rs::types::RequiresRole::User,
                     timeout_ms: None,
                 },
-                hc_types::Action {
+                plugin_sdk_rs::types::Action {
                     id: "reload_config".into(),
                     label: "Reload config".into(),
                     description: Some(
@@ -234,10 +234,10 @@ async fn run(
                     result: None,
                     stream: false,
                     cancelable: false,
-                    concurrency: hc_types::Concurrency::default(),
+                    concurrency: plugin_sdk_rs::types::Concurrency::default(),
                     item_key: None,
                     item_operations: None,
-                    requires_role: hc_types::RequiresRole::User,
+                    requires_role: plugin_sdk_rs::types::RequiresRole::User,
                     timeout_ms: None,
                 },
             ],

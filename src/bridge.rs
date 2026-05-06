@@ -5,7 +5,7 @@ use crate::config::{Config, ThermostatEntry};
 use crate::control::{aggregate, compute_call_for, lockout_remaining};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use hc_types::device::{with_command_change_metadata, DeviceChange};
+use plugin_sdk_rs::types::{with_command_change_metadata, DeviceChange};
 use plugin_sdk_rs::DevicePublisher;
 use rumqttc::{AsyncClient, QoS};
 use serde_json::{json, Value};

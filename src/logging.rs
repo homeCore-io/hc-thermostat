@@ -298,7 +298,7 @@ fn compress_in_background(src: PathBuf) {
 ///
 /// **The returned `WorkerGuard` must be kept alive for the process lifetime.**
 ///
-/// Also returns a [`hc_logging::LogLevelHandle`] for dynamic log level changes
+/// Also returns a [`plugin_sdk_rs::logging::LogLevelHandle`] for dynamic log level changes
 /// via the plugin management protocol.
 pub fn init_logging(
     config_path: &str,
@@ -307,7 +307,7 @@ pub fn init_logging(
     cfg: &LoggingConfig,
 ) -> (
     tracing_appender::non_blocking::WorkerGuard,
-    hc_logging::LogLevelHandle,
+    plugin_sdk_rs::logging::LogLevelHandle,
     plugin_sdk_rs::mqtt_log_layer::MqttLogHandle,
 ) {
     let log_dir = Path::new(config_path)
@@ -341,7 +341,7 @@ pub fn init_logging(
     };
     // Prepend noise-suppression defaults (rumqttc Pingreq spam etc.); user
     // directives layered after so they win on conflict.
-    let initial_directives = hc_logging::with_noise_suppression(&initial_directives);
+    let initial_directives = plugin_sdk_rs::logging::with_noise_suppression(&initial_directives);
 
     let global_filter: EnvFilter = initial_directives
         .parse()
@@ -366,7 +366,7 @@ pub fn init_logging(
         .init();
 
     let level_handle =
-        hc_logging::LogLevelHandle::from_reload_handle(reload_handle, initial_directives);
+        plugin_sdk_rs::logging::LogLevelHandle::from_reload_handle(reload_handle, initial_directives);
 
     (guard, level_handle, mqtt_handle)
 }
