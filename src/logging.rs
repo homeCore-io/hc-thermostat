@@ -365,8 +365,10 @@ pub fn init_logging(
         .with(mqtt_layer)
         .init();
 
-    let level_handle =
-        plugin_sdk_rs::logging::LogLevelHandle::from_reload_handle(reload_handle, initial_directives);
+    let level_handle = plugin_sdk_rs::logging::LogLevelHandle::from_reload_handle(
+        reload_handle,
+        initial_directives,
+    );
 
     (guard, level_handle, mqtt_handle)
 }
