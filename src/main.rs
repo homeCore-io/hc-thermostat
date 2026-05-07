@@ -136,8 +136,20 @@ async fn run(
         .await?
         .with_custom_handler(move |cmd| match cmd["action"].as_str()? {
             "recalculate_all" => {
-                let _ = bridge_tx_for_mgmt.try_send(BridgeTask::RecalculateAll);
-                Some(serde_json::json!({ "status": "ok" }))
+                // `force: true` re-issues actuator commands unconditionally,
+                // not just on transition. Recovery path for the cached-vs-
+                // physical-reality drift after a restart (THERM-RESTART-1).
+                let force = cmd
+                    .get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let task = if force {
+                    BridgeTask::RecalculateAllForce
+                } else {
+                    BridgeTask::RecalculateAll
+                };
+                let _ = bridge_tx_for_mgmt.try_send(task);
+                Some(serde_json::json!({ "status": "ok", "force": force }))
             }
             "reload_config" => {
                 let _ = bridge_tx_for_mgmt.try_send(BridgeTask::ReloadConfig);
@@ -208,10 +220,26 @@ async fn run(
                     description: Some(
                         "Re-evaluate every thermostat against its current sensor \
                          readings. Useful after editing setpoints or sensor \
-                         topology by hand."
+                         topology by hand. Pass `force: true` to re-issue \
+                         actuator commands unconditionally — recovery path \
+                         when the cached actuator state has drifted from \
+                         physical reality (e.g. after an appliance restart)."
                             .into(),
                     ),
-                    params: None,
+                    params: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "force": {
+                                "type": "boolean",
+                                "default": false,
+                                "description": "Re-issue actuator commands \
+                                                unconditionally, ignoring \
+                                                cached actuator_state. Use to \
+                                                recover from cached-vs-physical \
+                                                drift after a restart."
+                            }
+                        }
+                    })),
                     result: None,
                     stream: false,
                     cancelable: false,
@@ -381,6 +409,10 @@ async fn run(
                     Some(BridgeTask::RecalculateAll) => {
                         info!("Management: recalculate_all");
                         bridge.recalculate_all().await;
+                    }
+                    Some(BridgeTask::RecalculateAllForce) => {
+                        info!("Management: recalculate_all force=true");
+                        bridge.recalculate_all_force().await;
                     }
                     Some(BridgeTask::ReloadConfig) => {
                         info!("Management: reload_config");
