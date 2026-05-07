@@ -53,6 +53,19 @@ struct Runtime {
     lockout_until: Option<DateTime<Utc>>,
     /// Last actuator publish error — cleared on next successful publish.
     actuator_last_error: Option<ActuatorError>,
+    /// True once the bridge has received at least one fresh reading from
+    /// every configured sensor since startup (or the thermostat is in
+    /// "off" mode / configured with no sensors). Until settled, the
+    /// bridge holds — recalculate computes nothing and issues no
+    /// actuator commands. The first recalculate after settle issues an
+    /// **unconditional** command for the desired state, syncing the
+    /// physical actuator to expected even if the cached
+    /// `actuator_state` already matches. This fixes THERM-RESTART-1:
+    /// after a plugin/appliance restart the cached state is restored
+    /// from retained MQTT, but the physical actuator may have drifted
+    /// (power blip, manual override). Without the force-issue, the
+    /// "transition only" command path would never re-sync.
+    settled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +85,7 @@ impl Runtime {
             pending_call: None,
             lockout_until: None,
             actuator_last_error: None,
+            settled: false,
         }
     }
 
@@ -104,6 +118,7 @@ impl Runtime {
             "actuator_last_change": self.actuator_last_change.map(|t| t.to_rfc3339()),
             "pending_call": self.pending_call,
             "lockout_until": self.lockout_until.map(|t| t.to_rfc3339()),
+            "settled": self.settled,
             "actuator_last_error": self.actuator_last_error.as_ref().map(|e| json!({
                 "timestamp": e.timestamp.to_rfc3339(),
                 "message": e.message,
@@ -651,8 +666,33 @@ impl BridgeHandle {
         self.recalculate(therm_id).await;
     }
 
-    /// Recalculate a single thermostat and publish updated state / actuator cmd.
+    /// Recalculate a single thermostat and publish updated state / actuator
+    /// cmd, using the normal "command-on-transition" rule. Use
+    /// [`recalculate_force`] (or pass `force=true` to
+    /// [`recalculate_inner`]) for the post-restart re-sync path.
     pub async fn recalculate(&self, therm_id: &str) {
+        self.recalculate_inner(therm_id, false).await;
+    }
+
+    /// Like [`recalculate`] but issues the actuator command
+    /// **unconditionally** for the computed `desired_act`, regardless of
+    /// whether the cached `actuator_state` already matches. The
+    /// post-restart settle path uses this; the manual `recalculate_all`
+    /// management command also takes a `{"force": true}` flag that
+    /// routes here.
+    ///
+    /// Why force exists: after a plugin/appliance restart the cached
+    /// `actuator_state` is restored from retained MQTT but the physical
+    /// actuator may have drifted (power blip during the restart window,
+    /// external command, dead Z-Wave node etc.). The transition-only
+    /// path never re-sends a command that matches cached state, so
+    /// reality stays out of sync until something causes a transition.
+    /// Forced re-sync resolves the drift.
+    pub async fn recalculate_force(&self, therm_id: &str) {
+        self.recalculate_inner(therm_id, true).await;
+    }
+
+    async fn recalculate_inner(&self, therm_id: &str, force: bool) {
         let (publish_cmd, device_id, state_payload) = {
             let mut b = self.inner.lock().await;
             let cache = b.sensor_cache.clone();
@@ -668,8 +708,39 @@ impl BridgeHandle {
                 }
             }
 
-            // 2. Stale path.
-            if readings.is_empty() && rt.cfg.mode != "off" {
+            // Settle gate (THERM-RESTART-1). Until every configured
+            // sensor has reported at least once, we hold — no actuator
+            // commands, no state-machine updates. As soon as all
+            // sensors are seen we run a one-shot force-eval that
+            // unconditionally syncs the actuator to desired (joining
+            // the same code path as the explicit `force=true` route).
+            // Trivial cases that don't need sensor data — mode "off"
+            // and zero configured sensors — settle immediately.
+            let all_sensors_seen = rt.cfg.mode == "off"
+                || rt.cfg.sensor_device_ids.is_empty()
+                || rt
+                    .cfg
+                    .sensor_device_ids
+                    .iter()
+                    .all(|s| cache.contains_key(s));
+            let do_settle_now = !rt.settled && all_sensors_seen;
+            // Suppress only when we're pre-settle and the operator
+            // hasn't manually forced. A manual `force=true` always
+            // runs (so the operator can override the gate when
+            // diagnosing or recovering).
+            let suppress = !rt.settled && !all_sensors_seen && !force;
+            // Force the actuator command on settle OR on explicit op
+            // request. Either way, the final publish_cmd branch ignores
+            // the `desired_act != actuator_state` check.
+            let force_command = force || do_settle_now;
+
+            if suppress {
+                // Pre-settle: keep telemetry in sync (the published
+                // state will show whatever rt's last full settled
+                // values were) but don't act yet.
+                (None, rt.device_id(), rt.state_payload())
+            } else if readings.is_empty() && rt.cfg.mode != "off" {
+                // 2. Stale path.
                 if rt.call_for != "stale" {
                     warn!(id = %rt.cfg.id, "No sensor readings available");
                     rt.call_for = "stale".into();
@@ -701,7 +772,7 @@ impl BridgeHandle {
                 let force_off = rt.cfg.mode == "off" && rt.actuator_state;
                 let remaining = if force_off {
                     0
-                } else if desired_act != rt.actuator_state {
+                } else if desired_act != rt.actuator_state || force_command {
                     lockout_remaining(
                         rt.actuator_state,
                         rt.cfg.min_on_secs,
@@ -719,7 +790,7 @@ impl BridgeHandle {
                     rt.current_temperature = current;
                     rt.call_for = new_call.to_string();
                     None
-                } else if desired_act != rt.actuator_state {
+                } else if desired_act != rt.actuator_state || force_command {
                     // Default command shape matches the HomeCore Binary Switch
                     // convention (`on` attribute) used by hc-zwave, hc-hue,
                     // hc-wled, etc. Users with non-standard actuators override
@@ -735,12 +806,22 @@ impl BridgeHandle {
                             .clone()
                             .unwrap_or_else(|| json!({"on": false}))
                     };
+                    let was_transition = desired_act != rt.actuator_state;
                     rt.actuator_state = desired_act;
                     rt.actuator_last_change = Some(now);
                     rt.pending_call = None;
                     rt.lockout_until = None;
                     rt.current_temperature = current;
                     rt.call_for = new_call.to_string();
+                    if force_command && !was_transition {
+                        info!(
+                            id = %rt.cfg.id,
+                            actuator = %rt.cfg.actuator_device_id,
+                            desired = desired_act,
+                            do_settle_now,
+                            "Force-issuing actuator command (cached state matched but reality may have drifted)"
+                        );
+                    }
                     if rt.cfg.actuator_device_id.is_empty() {
                         None
                     } else {
@@ -753,6 +834,17 @@ impl BridgeHandle {
                     rt.call_for = new_call.to_string();
                     None
                 };
+
+                if do_settle_now {
+                    rt.settled = true;
+                    info!(
+                        id = %rt.cfg.id,
+                        current = ?current,
+                        call_for = %rt.call_for,
+                        sensors = rt.cfg.sensor_device_ids.len(),
+                        "Thermostat settled — all sensors reported"
+                    );
+                }
 
                 (publish_cmd, rt.device_id(), rt.state_payload())
             }
@@ -833,6 +925,23 @@ impl BridgeHandle {
         };
         for id in ids {
             self.recalculate(&id).await;
+        }
+    }
+
+    /// Force a re-sync of every thermostat — issues actuator commands
+    /// unconditionally (regardless of cached actuator_state) for the
+    /// computed desired state. Operator-triggered via the
+    /// `recalculate_all` management command with `{"force": true}`.
+    /// Use case: appliance/plugin restart left the cached actuator
+    /// state out of sync with physical reality and a normal
+    /// recalculate_all wouldn't issue any commands. THERM-RESTART-1.
+    pub async fn recalculate_all_force(&self) {
+        let ids: Vec<String> = {
+            let b = self.inner.lock().await;
+            b.thermostats.keys().cloned().collect()
+        };
+        for id in ids {
+            self.recalculate_force(&id).await;
         }
     }
 
@@ -1179,6 +1288,11 @@ impl BridgeHandle {
 /// actions (recalculate_all, reload_config) from synchronous callback context.
 pub enum BridgeTask {
     RecalculateAll,
+    /// Force-recalculate every thermostat — issues actuator commands
+    /// regardless of whether cached state already matches desired.
+    /// Sent by the `recalculate_all` management command when invoked
+    /// with `{"force": true}`. THERM-RESTART-1 recovery path.
+    RecalculateAllForce,
     ReloadConfig,
     AddThermostat { entry: Box<ThermostatEntry> },
     RemoveThermostat { id: String },
