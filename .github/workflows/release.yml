@@ -25,6 +25,9 @@ permissions:
 jobs:
   release:
     uses: homeCore-io/hc-scripts/.github/workflows/rust-release.yml@main
+    # Inherit org-level secrets (CROSS_REPO_DISPATCH_PAT) so the reusable
+    # workflow can cascade to homeCore-io/docker on develop pushes.
+    secrets: inherit
     with:
       binary_name: hc-thermostat
       config_example: config/config.toml.example
