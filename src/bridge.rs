@@ -1294,8 +1294,12 @@ pub enum BridgeTask {
     /// with `{"force": true}`. THERM-RESTART-1 recovery path.
     RecalculateAllForce,
     ReloadConfig,
-    AddThermostat { entry: Box<ThermostatEntry> },
-    RemoveThermostat { id: String },
+    AddThermostat {
+        entry: Box<ThermostatEntry>,
+    },
+    RemoveThermostat {
+        id: String,
+    },
 }
 
 pub fn bridge_task_channel() -> (mpsc::Sender<BridgeTask>, mpsc::Receiver<BridgeTask>) {

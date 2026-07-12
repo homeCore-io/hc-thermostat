@@ -139,10 +139,7 @@ async fn run(
                 // `force: true` re-issues actuator commands unconditionally,
                 // not just on transition. Recovery path for the cached-vs-
                 // physical-reality drift after a restart (THERM-RESTART-1).
-                let force = cmd
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let force = cmd.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
                 let task = if force {
                     BridgeTask::RecalculateAllForce
                 } else {
