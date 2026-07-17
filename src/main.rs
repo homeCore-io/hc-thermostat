@@ -364,6 +364,13 @@ async fn run(
         });
     };
 
+    // Publish the operator-config JSON Schema so the hc-web editor renders a
+    // typed form (rides on the capability manifest).
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+
     let run_handle = tokio::spawn(async move {
         if let Err(e) = client.run_managed_with_state(cmd_cb, state_cb, mgmt).await {
             error!(error = %e, "PluginClient run loop exited");
