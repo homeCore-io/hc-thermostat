@@ -371,6 +371,10 @@ async fn run(
         None => mgmt,
     };
 
+    // …and the plugin-authored descriptor the editor renders instead of
+    // guessing a form from the schema. Rides the same manifest.
+    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
+
     let run_handle = tokio::spawn(async move {
         if let Err(e) = client.run_managed_with_state(cmd_cb, state_cb, mgmt).await {
             error!(error = %e, "PluginClient run loop exited");
