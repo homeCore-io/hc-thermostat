@@ -44,27 +44,26 @@ pub fn config_descriptor() -> serde_json::Value {
                         .render("list")
                         .key_by("id")
                         .columns([
-                            Field::text("id").label("ID").prompt_when_empty().help(
-                                "Identifies this thermostat to homeCore. Rules \
-                                     refer to it by this, so changing it later \
-                                     breaks them — pick it once.",
-                            ),
+                            // Generated, never shown. This becomes the device
+                            // id `thermostat_<id>`, which sounds like something
+                            // to choose until you notice nobody types it: core
+                            // assigns the device a canonical name from its area
+                            // and Name (`hallway.upstairs`) and the rule
+                            // resolver accepts that. Asking for an id only
+                            // invented a second identifier that must never
+                            // change.
+                            Field::text("id").label("ID").generated(),
                             Field::text("name").label("Name").prompt_when_empty(),
                             Field::list("sensor_device_ids", "text")
                                 .label("Sensors")
                                 .prompt_when_empty()
-                                .source(Source::core_resource("all_devices"))
+                                .source(
+                                    Source::core_resource("all_devices")
+                                        .capability("temperature"),
+                                )
                                 .help(
                                     "One or more devices reporting temperature. \
                                      Several are combined by the rule below.",
-                                ),
-                            Field::text("sensor_attribute")
-                                .label("Read attribute")
-                                .default("temperature")
-                                .help(
-                                    "Which reading to take from each sensor. \
-                                     `temperature` for nearly everything; change it \
-                                     for a device that names it differently.",
                                 ),
                             Field::select("aggregation")
                                 .label("Combine by")
@@ -103,19 +102,11 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .label("Switches")
                                 .placeholder("Nothing")
                                 .prompt_when_empty()
-                                .source(Source::core_resource("all_devices"))
+                                .source(
+                                    Source::core_resource("all_devices")
+                                        .capability("switch"),
+                                )
                                 .help("The device driven on and off — a relay, a switch, a valve."),
-                            Field::text("actuator_on_cmd")
-                                .label("On command")
-                                .placeholder(r#"{"action":"set","on":true}"#)
-                                .help(
-                                    "Leave empty for an ordinary switch. Set it only \
-                                     when the actuator needs a specific payload — \
-                                     the JSON is sent verbatim.",
-                                ),
-                            Field::text("actuator_off_cmd")
-                                .label("Off command")
-                                .placeholder(r#"{"action":"set","on":false}"#),
                             Field::duration("min_on_secs")
                                 .label("Minimum on")
                                 .unit("secs")
@@ -343,6 +334,22 @@ mod descriptor_tests {
                 // Bootstrap identity, fixed at install time. Editing it would
                 // rename the plugin out from under core's records.
                 "homecore.plugin_id",
+                // Implied by the sensor picker. It only offers devices that
+                // publish a `temperature` attribute, so which attribute to read
+                // is already answered and asking again could only contradict
+                // the choice. Kept in the struct, with its default, so a device
+                // naming the reading something else stays reachable by editing
+                // the TOML — unconfigurable and merely unprompted are different
+                // things.
+                "thermostat[].sensor_attribute",
+                // Implied by the switch picker, which offers only binary
+                // switches. The runtime already falls back to the HomeCore
+                // Binary Switch convention — `{"on": true}` / `{"on": false}` —
+                // so for every device now selectable these fields would restate
+                // what the plugin does anyway. They remain in the struct as the
+                // escape hatch for an actuator wanting a bespoke payload.
+                "thermostat[].actuator_on_cmd",
+                "thermostat[].actuator_off_cmd",
             ],
         );
         assert!(
