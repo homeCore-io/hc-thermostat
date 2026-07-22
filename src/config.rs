@@ -58,8 +58,7 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .label("Sensors")
                                 .prompt_when_empty()
                                 .source(
-                                    Source::core_resource("all_devices")
-                                        .capability("temperature"),
+                                    Source::core_resource("all_devices").capability("temperature"),
                                 )
                                 .help(
                                     "One or more devices reporting temperature. \
@@ -102,10 +101,7 @@ pub fn config_descriptor() -> serde_json::Value {
                                 .label("Switches")
                                 .placeholder("Nothing")
                                 .prompt_when_empty()
-                                .source(
-                                    Source::core_resource("all_devices")
-                                        .capability("switch"),
-                                )
+                                .source(Source::core_resource("all_devices").capability("switch"))
                                 .help("The device driven on and off — a relay, a switch, a valve."),
                             Field::duration("min_on_secs")
                                 .label("Minimum on")
