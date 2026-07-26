@@ -9,6 +9,7 @@ mod bridge;
 mod config;
 mod control;
 mod logging;
+mod schema;
 
 use bridge::{BridgeHandle, BridgeTask};
 use config::Config;
