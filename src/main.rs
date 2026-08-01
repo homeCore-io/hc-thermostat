@@ -274,23 +274,32 @@ async fn run(
     let publisher = client.device_publisher();
     // Conditions for the plugin page, not only the log.
     let notices = client.notices();
-    // A virtual thermostat has nothing to connect to, so the only way it can
-    // be useless is having none defined — which otherwise looks identical to
-    // a healthy plugin.
-    if cfg.thermostats.is_empty() {
-        notices.raise(
-            PluginNotice::warning(
-                "no_thermostats_configured",
-                "No thermostats are defined, so this plugin publishes no devices.",
-            )
-            .with_remedy(
-                "Add one under Configuration. A thermostat here is virtual: it drives \
-                 an existing switch or relay device from an existing temperature \
-                 sensor, so have both device ids to hand.",
-            ),
-        );
-    }
     let mqtt_client = client.mqtt_client();
+    // Whether this plugin has anything to drive, said on the plugin page.
+    // Read from the live set every time rather than decided at startup:
+    // thermostats can be added, removed and reloaded over the management
+    // protocol without a restart, and a notice is current state.
+    async fn refresh_thermostat_notice(
+        bridge: &BridgeHandle,
+        notices: &plugin_sdk_rs::PluginNotices,
+    ) {
+        if bridge.get_thermostats().await.is_empty() {
+            notices.raise(
+                PluginNotice::warning(
+                    "no_thermostats_configured",
+                    "No thermostats are defined, so this plugin publishes no devices.",
+                )
+                .with_remedy(
+                    "Add one under Configuration. A thermostat here is virtual: it \
+                     drives an existing switch or relay device from an existing \
+                     temperature sensor, so have both device ids to hand.",
+                ),
+            );
+        } else {
+            notices.clear("no_thermostats_configured");
+        }
+    }
+
     let bridge = BridgeHandle::new(
         &cfg,
         publisher.clone(),
@@ -299,6 +308,7 @@ async fn run(
         snapshot.clone(),
     )
     .await?;
+    refresh_thermostat_notice(&bridge, &notices).await;
     let bridge = Arc::new(bridge);
 
     // 6. Subscribe to external sensor state topics BEFORE spawning run_managed
@@ -451,6 +461,7 @@ async fn run(
                                     warn!(error = %e, "register_all after reload failed");
                                 }
                                 bridge.recalculate_all().await;
+                                refresh_thermostat_notice(&bridge, &notices).await;
                             }
                             Err(e) => error!(error = %e, "reload_config failed"),
                         }
@@ -460,12 +471,14 @@ async fn run(
                         if let Err(e) = bridge.add_thermostat(*entry).await {
                             warn!(error = %e, "add_thermostat failed");
                         }
+                        refresh_thermostat_notice(&bridge, &notices).await;
                     }
                     Some(BridgeTask::RemoveThermostat { id }) => {
                         info!(id, "Management: remove_thermostat");
                         if let Err(e) = bridge.remove_thermostat(&id).await {
                             warn!(error = %e, "remove_thermostat failed");
                         }
+                        refresh_thermostat_notice(&bridge, &notices).await;
                     }
                     None => break,
                 }
