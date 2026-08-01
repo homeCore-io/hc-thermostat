@@ -1,6 +1,7 @@
 //! hc-thermostat — virtual thermostat plugin for homeCore.
 
 use anyhow::Result;
+use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -271,6 +272,24 @@ async fn run(
 
     // 5. Create bridge + device publisher handle.
     let publisher = client.device_publisher();
+    // Conditions for the plugin page, not only the log.
+    let notices = client.notices();
+    // A virtual thermostat has nothing to connect to, so the only way it can
+    // be useless is having none defined — which otherwise looks identical to
+    // a healthy plugin.
+    if cfg.thermostats.is_empty() {
+        notices.raise(
+            PluginNotice::warning(
+                "no_thermostats_configured",
+                "No thermostats are defined, so this plugin publishes no devices.",
+            )
+            .with_remedy(
+                "Add one under Configuration. A thermostat here is virtual: it drives \
+                 an existing switch or relay device from an existing temperature \
+                 sensor, so have both device ids to hand.",
+            ),
+        );
+    }
     let mqtt_client = client.mqtt_client();
     let bridge = BridgeHandle::new(
         &cfg,
