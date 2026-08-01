@@ -128,6 +128,26 @@ impl Runtime {
     }
 }
 
+/// A representative state payload, for the schema drift test.
+///
+/// `state_payload` is the authority on what a thermostat publishes, and the
+/// schema has to match it exactly. Exposing one built from a default runtime
+/// lets the test compare the two sets rather than trusting a hand-copied list.
+#[cfg(test)]
+pub fn sample_state_payload() -> Value {
+    // Built by deserialising rather than by a hand-written literal, so the
+    // fixture picks up the config type's own serde defaults and cannot drift
+    // from what a real thermostat entry looks like.
+    let cfg: ThermostatEntry = serde_json::from_value(serde_json::json!({
+        "id": "t1",
+        "name": "Test",
+        "sensor_device_ids": ["sensor_a"],
+        "setpoint": 21.0,
+    }))
+    .expect("minimal thermostat entry deserialises");
+    Runtime::new(cfg).state_payload()
+}
+
 /// Shared plugin state. Wrapped in Arc<Mutex<...>> because commands and state
 /// messages arrive via separate callback threads.
 pub struct Bridge {
@@ -283,6 +303,9 @@ impl BridgeHandle {
             self.publisher
                 .register_device_full(id, name, Some("thermostat"), None, None)
                 .await?;
+            // Retained, so a client connecting later still knows what this
+            // device's attributes mean and which commands it accepts.
+            crate::schema::publish(&self.publisher, id).await?;
             self.publisher.subscribe_commands(id).await?;
             self.publisher.publish_availability(id, true).await?;
         }
@@ -1078,6 +1101,7 @@ impl BridgeHandle {
         self.publisher
             .register_device_full(&device_id, &display_name, Some("thermostat"), None, None)
             .await?;
+        crate::schema::publish(&self.publisher, &device_id).await?;
         self.publisher.subscribe_commands(&device_id).await?;
         self.publisher
             .publish_availability(&device_id, true)
@@ -1294,8 +1318,12 @@ pub enum BridgeTask {
     /// with `{"force": true}`. THERM-RESTART-1 recovery path.
     RecalculateAllForce,
     ReloadConfig,
-    AddThermostat { entry: Box<ThermostatEntry> },
-    RemoveThermostat { id: String },
+    AddThermostat {
+        entry: Box<ThermostatEntry>,
+    },
+    RemoveThermostat {
+        id: String,
+    },
 }
 
 pub fn bridge_task_channel() -> (mpsc::Sender<BridgeTask>, mpsc::Receiver<BridgeTask>) {

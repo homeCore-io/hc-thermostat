@@ -23,9 +23,8 @@ target
 # Plugin config — keep example only
 config/config.toml
 config/config.dev.toml
+config/.published-device-ids.json
 *.partial
 
 # Runtime log files
 logs/
-
-Cargo.lock

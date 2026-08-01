@@ -1,6 +1,7 @@
 //! hc-thermostat — virtual thermostat plugin for homeCore.
 
 use anyhow::Result;
+use plugin_sdk_rs::types::PluginNotice;
 use plugin_sdk_rs::{PluginClient, PluginConfig};
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -9,6 +10,7 @@ mod bridge;
 mod config;
 mod control;
 mod logging;
+mod schema;
 
 use bridge::{BridgeHandle, BridgeTask};
 use config::Config;
@@ -139,10 +141,7 @@ async fn run(
                 // `force: true` re-issues actuator commands unconditionally,
                 // not just on transition. Recovery path for the cached-vs-
                 // physical-reality drift after a restart (THERM-RESTART-1).
-                let force = cmd
-                    .get("force")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let force = cmd.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
                 let task = if force {
                     BridgeTask::RecalculateAllForce
                 } else {
@@ -273,6 +272,24 @@ async fn run(
 
     // 5. Create bridge + device publisher handle.
     let publisher = client.device_publisher();
+    // Conditions for the plugin page, not only the log.
+    let notices = client.notices();
+    // A virtual thermostat has nothing to connect to, so the only way it can
+    // be useless is having none defined — which otherwise looks identical to
+    // a healthy plugin.
+    if cfg.thermostats.is_empty() {
+        notices.raise(
+            PluginNotice::warning(
+                "no_thermostats_configured",
+                "No thermostats are defined, so this plugin publishes no devices.",
+            )
+            .with_remedy(
+                "Add one under Configuration. A thermostat here is virtual: it drives \
+                 an existing switch or relay device from an existing temperature \
+                 sensor, so have both device ids to hand.",
+            ),
+        );
+    }
     let mqtt_client = client.mqtt_client();
     let bridge = BridgeHandle::new(
         &cfg,
@@ -366,6 +383,17 @@ async fn run(
             }
         });
     };
+
+    // Publish the operator-config JSON Schema so the hc-web editor renders a
+    // typed form (rides on the capability manifest).
+    let mgmt = match config::config_schema() {
+        Some(schema) => mgmt.with_config_schema(schema),
+        None => mgmt,
+    };
+
+    // …and the plugin-authored descriptor the editor renders instead of
+    // guessing a form from the schema. Rides the same manifest.
+    let mgmt = mgmt.with_config_descriptor(config::config_descriptor());
 
     let run_handle = tokio::spawn(async move {
         if let Err(e) = client.run_managed_with_state(cmd_cb, state_cb, mgmt).await {

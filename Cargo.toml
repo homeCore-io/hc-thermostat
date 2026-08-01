@@ -1,6 +1,6 @@
 [package]
 name        = "hc-thermostat"
-version     = "0.1.5"
+version     = "0.1.9"
 edition     = "2021"
 license     = "MIT OR Apache-2.0"
 description = "Virtual thermostat plugin for homeCore — aggregates temperature sensors, applies hysteresis + short-cycle protection, drives an actuator device on/off"
@@ -11,7 +11,8 @@ name = "hc-thermostat"
 path = "src/main.rs"
 
 [dependencies]
-plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", branch = "main" }
+schemars           = { version = "0.8", optional = true }
+plugin-sdk-rs      = { git = "https://github.com/homeCore-io/hc-plugin-sdk-rs", tag = "v0.3.10" }
 tokio              = { version = "1",   features = ["full"] }
 rumqttc            = "0.25"
 serde              = { version = "1",   features = ["derive"] }
@@ -28,3 +29,7 @@ flate2             = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = ["schema"]
+schema = ["dep:schemars"]
