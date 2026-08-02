@@ -17,8 +17,10 @@ to heat/cool/off mode. Optional short-cycle protection (`min_on_secs` /
 
 ## Setup
 
-1. Copy `config/config.toml.example` to `config/config.toml` and fill in
-   broker credentials + at least one `[[thermostat]]` block.
+1. Install it from the web UI — **Plugins → Add** — and open its
+   **Configuration** tab to add at least one `[[thermostat]]` block. homeCore
+   owns the config file (`config/plugins/plugin.thermostat.toml`) and restarts
+   the plugin when it changes.
 2. Add an MQTT ACL entry for `plugin.thermostat` on the broker — the plugin
    needs publish access to its own devices plus read access to its configured
    sensor devices' `state` topics:
@@ -39,19 +41,32 @@ to heat/cool/off mode. Optional short-cycle protection (`min_on_secs` /
    > patterns are metadata only — connection credentials are checked, but
    > per-topic ACLs are not. Deployments that need real topic isolation
    > (containers, third-party plugins, compliance) should run HomeCore
-   > against an external Mosquitto broker. See `mqttAuthzPlan.md` for the
-   > deploy recipe; `hc-cli broker generate-mosquitto-config` converts the
+   > against an external Mosquitto broker. See
+   > <https://homecore.io/docs/administration/broker> for the deploy recipe;
+   > `hc-cli broker generate-mosquitto-config` converts the
    > same `allow_pub` / `allow_sub` patterns above into a Mosquitto ACL
    > file that _is_ enforced.
-3. Add a `[[plugins]]` entry in your `homecore.toml` or `homecore.dev.toml`:
-   ```toml
-   [[plugins]]
-   id      = "plugin.thermostat"
-   binary  = "../plugins/hc-thermostat/target/debug/hc-thermostat"
-   config  = "../plugins/hc-thermostat/config/config.dev.toml"
-   enabled = true
-   ```
-4. `cargo build` (or `just build-release` for production).
+Building it yourself instead? Then you do write a `[[plugins]]` entry, because
+nothing installed it for you:
+
+```toml
+[[plugins]]
+id      = "plugin.thermostat"
+binary  = "../plugins/hc-thermostat/target/debug/hc-thermostat"
+config  = "../plugins/hc-thermostat/config/config.dev.toml"
+enabled = true
+```
+
+Then `cargo build`, or `just build-release` for production.
+
+## Notices
+
+Problems are reported as **notices**, shown on the plugin's card in the web
+UI. They are state rather than log lines.
+
+| Code | Means |
+|---|---|
+| `no_thermostats_configured` | No `[[thermostat]]` blocks, so the plugin has nothing to control. Clears when one is added. |
 
 ## Configuration
 
