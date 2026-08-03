@@ -9,7 +9,6 @@ use tracing::{error, info, warn};
 mod bridge;
 mod config;
 mod control;
-mod logging;
 mod schema;
 
 use bridge::{BridgeHandle, BridgeTask};
@@ -57,13 +56,13 @@ fn init_logging_bootstrap(
     #[derive(serde::Deserialize, Default)]
     struct Bootstrap {
         #[serde(default)]
-        logging: logging::LoggingConfig,
+        logging: plugin_sdk_rs::logging::LoggingConfig,
     }
     let bootstrap: Bootstrap = std::fs::read_to_string(config_path)
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
-    logging::init_logging(
+    plugin_sdk_rs::logging::init_logging(
         config_path,
         "hc-thermostat",
         "hc_thermostat=info",

@@ -7,16 +7,13 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-// Re-declare the plugin modules here so tests can call into them without a
-// lib target. `config.rs` depends on `logging::LoggingConfig`, so include both.
-// Items only consumed by main.rs (RotatingWriter, init_logging, etc.) appear
-// dead in this compilation unit even though they aren't — allow that locally.
+// Re-declare config here so tests can call into it without a lib target.
+// `logging` used to be included alongside it, because config.rs referenced a
+// local `logging::LoggingConfig`; that type now comes from the SDK, so there is
+// nothing left to include.
 #[path = "../src/config.rs"]
 #[allow(dead_code)]
 mod config;
-#[path = "../src/logging.rs"]
-#[allow(dead_code)]
-mod logging;
 
 fn write_config(content: &str) -> NamedTempFile {
     let mut f = NamedTempFile::new().unwrap();
