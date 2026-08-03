@@ -1,7 +1,7 @@
 //! Plugin configuration — parsed from `config.toml`.
 
-use crate::logging::LoggingConfig;
 use anyhow::{anyhow, Result};
+use plugin_sdk_rs::logging::LoggingConfig;
 use serde::{Deserialize, Serialize};
 
 /// Operator-config JSON Schema, published on the capability manifest so the
